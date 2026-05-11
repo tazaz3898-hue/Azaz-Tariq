@@ -1,0 +1,112 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // -------------------------------------------------------------------------
+    // 1. GLOBALS & HELPERS
+    // -------------------------------------------------------------------------
+    
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Common validation for strings
+    function isValidString(val, min, max) {
+      return val is string && val.size() >= min && val.size() <= max;
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. ENTITY VALIDATIONS
+    // -------------------------------------------------------------------------
+
+    function isValidProfile(data) {
+      return data.keys().hasAll(['uid', 'name', 'email', 'role']) &&
+             data.uid == request.auth.uid &&
+             data.role in ['freelancer', 'client'] &&
+             isValidString(data.name, 2, 100) &&
+             isValidString(data.email, 5, 256);
+    }
+
+    function isValidJob(data) {
+      return data.keys().hasAll(['title', 'description', 'clientId', 'status', 'budget', 'category']) &&
+             data.clientId == request.auth.uid &&
+             data.status in ['open', 'in-progress', 'completed', 'cancelled'] &&
+             isValidString(data.title, 5, 200) &&
+             data.budget is number && data.budget >= 0;
+    }
+
+    function isValidApplication(data) {
+      return data.keys().hasAll(['jobId', 'freelancerId', 'coverLetter', 'bidAmount', 'status']) &&
+             data.freelancerId == request.auth.uid &&
+             data.status in ['pending', 'accepted', 'rejected'] &&
+             isValidString(data.coverLetter, 10, 5000);
+    }
+
+    function isValidCommunityPost(data) {
+      return data.keys().hasAll(['authorId', 'content', 'createdAt']) &&
+             data.authorId == request.auth.uid &&
+             isValidString(data.content, 1, 2000);
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. MATCH BLOCKS
+    // -------------------------------------------------------------------------
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    match /profiles/{uid} {
+      allow read: if isSignedIn();
+      allow create: if isOwner(uid) && isValidProfile(incoming());
+      allow update: if isOwner(uid) && isValidProfile(incoming()) && (
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'bio', 'skills', 'avatar', 'updatedAt'])
+      );
+    }
+
+    match /jobs/{jobId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidJob(incoming());
+      allow update: if (isOwner(existing().clientId) && isValidJob(incoming())) ||
+                    (isSignedIn() && incoming().diff(existing()).affectedKeys().hasOnly(['applicationsCount']));
+      allow delete: if isOwner(existing().clientId);
+      
+      match /applications/{appId} {
+        allow read: if isSignedIn() && (isOwner(resource.data.freelancerId) || isOwner(get(/databases/$(database)/documents/jobs/$(jobId)).data.clientId));
+        allow create: if isSignedIn() && isValidApplication(incoming());
+        allow update: if (isOwner(resource.data.freelancerId) && incoming().diff(existing()).affectedKeys().hasOnly(['coverLetter', 'bidAmount'])) ||
+                      (isOwner(get(/databases/$(database)/documents/jobs/$(jobId)).data.clientId) && incoming().diff(existing()).affectedKeys().hasOnly(['status']));
+      }
+    }
+
+    match /courses/{courseId} {
+      allow read: if isSignedIn();
+      allow write: if false; // Admin only via console or future admin setup
+    }
+
+    match /community/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidCommunityPost(incoming());
+      allow update: if isSignedIn() && (
+        (isOwner(existing().authorId) && isValidCommunityPost(incoming())) ||
+        (incoming().diff(existing()).affectedKeys().hasOnly(['likes'])) // Like action
+      );
+      allow delete: if isOwner(existing().authorId);
+    }
+  }
+}
